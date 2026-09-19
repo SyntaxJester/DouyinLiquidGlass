@@ -19,17 +19,25 @@ data class ModuleSettings(
      */
     val manualPlacement: Boolean = true,
 
-    /** Extra gap above the bottom edge when [manualPlacement] is on. */
-    val manualBottomOffsetDp: Float = 8f,
+    /**
+     * Gap above the bottom edge when [manualPlacement] is on. Default 0 so the
+     * glass sits directly OVER the native tab bar (icons show through it),
+     * which is the "glass tab bar" look. Raise it to float the pill above the
+     * native bar instead.
+     */
+    val manualBottomOffsetDp: Float = 0f,
 
-    /** Height of the floating glass bar. Douyin's native bar is ~49dp tall. */
-    val barHeightDp: Float = 56f,
+    /**
+     * Height of the glass bar. Default 64dp so it covers the native tab strip
+     * (icons + labels) on most phones.
+     */
+    val barHeightDp: Float = 64f,
 
     /** Corner radius of the glass pill. */
-    val cornerRadiusDp: Float = 28f,
+    val cornerRadiusDp: Float = 26f,
 
     /** Left/right inset from the screen edges. */
-    val horizontalMarginDp: Float = 12f,
+    val horizontalMarginDp: Float = 8f,
 
     /** Gap between the glass bar and the bottom of the usable screen (auto mode). */
     val bottomMarginDp: Float = 10f,
