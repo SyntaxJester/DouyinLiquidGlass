@@ -16,16 +16,17 @@ import com.autumn.douyin.liquidglass.settings.ModuleSettings
 /**
  * Owns one glass overlay for one [Activity].
  *
- * v1.3 rendering model: NO screen capture. The frosted look is produced by
- *   (a) the system's cross-window blur behind the overlay window
- *       (WindowManager.LayoutParams.setBlurBehindRadius + FLAG_BLUR_BEHIND,
- *        API 31+; blurs whatever is behind — including video SurfaceViews —
- *        and can never sample our own pixels), and
+ * v1.4 rendering model: NO screen capture, NO screen-wide blur. The frosted
+ * look is produced by
+ *   (a) WINDOW-BOUNDS background blur (mBackgroundBlurRadius, API 31+): blurs
+ *       only the content within the pill's own rounded bounds, never the whole
+ *       screen — so the video above the bar stays sharp, and
  *   (b) translucent Canvas gradients drawn by [LiquidGlassOverlayView].
  *
- * This eliminates the white-out that PixelCopy caused: Douyin plays video on a
- * hardware SurfaceView that PixelCopy cannot read, so the old capture returned
- * a blank/white frame and we painted white.
+ * History: v1.0-1.2 used PixelCopy → white-out (Douyin video is a hardware
+ * SurfaceView PixelCopy can't read). v1.3 used FLAG_BLUR_BEHIND → blurred the
+ * ENTIRE screen behind the window (the whole video went fuzzy). Both wrong;
+ * this version blurs only inside the bar.
  *
  * Placement (see [ModuleSettings.manualPlacement]):
  *   - manual : pin to the bottom of the screen. Version-proof.
@@ -76,7 +77,7 @@ class OverlayController(
                 if (type == WindowManager.LayoutParams.TYPE_APPLICATION_PANEL) {
                     params.token = token
                 }
-                enableBlurBehind(params)
+                applyBackgroundBlur(params)
                 activity.windowManager.addView(view, params)
                 dedicatedWindow = true
                 ModuleLog.i("overlay attached (windowType=$type) to ${activity.javaClass.simpleName}")
@@ -110,23 +111,33 @@ class OverlayController(
         return false
     }
 
-    /** Turn on system cross-window blur behind our window, when supported. */
-    private fun enableBlurBehind(params: WindowManager.LayoutParams) {
+    /**
+     * BACKGROUND blur — blurs ONLY the content within this window's own bounds
+     * (the pill), never the whole screen.
+     *
+     * The public counterpart is [android.view.Window.setBackgroundBlurRadius];
+     * for a WindowManager-added view we set the same value on the hidden
+     * LayoutParams field via reflection. If that's unavailable we silently fall
+     * back to translucent-only glass (still looks fine, just not blurred).
+     *
+     * NOTE: this deliberately does NOT use FLAG_BLUR_BEHIND / blurBehindRadius —
+     * that blurs the entire screen behind the window (the v1.3.0 bug).
+     */
+    private fun applyBackgroundBlur(params: WindowManager.LayoutParams) {
+        val radiusPx = dp(settings.blurRadiusDp).coerceIn(0, 80)
+        if (radiusPx <= 0) return
         try {
-            params.flags = params.flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
-            val supported = activity.windowManager.isCrossWindowBlurEnabled
-            if (supported) {
-                val px = dp(settings.blurRadiusDp).coerceIn(0, 80)
-                params.blurBehindRadius = px
-                // A faint scrim so the blur reads even over bright content.
-                params.dimAmount = 0.06f
-                params.flags = params.flags or WindowManager.LayoutParams.FLAG_DIM_BEHIND
-                ModuleLog.d("cross-window blur enabled, radius=${px}px")
-            } else {
-                ModuleLog.d("cross-window blur NOT supported on this ROM; translucent-only glass")
+            if (!activity.windowManager.isCrossWindowBlurEnabled) {
+                ModuleLog.d("cross-window blur unsupported/disabled; translucent-only glass")
+                return
             }
+            val field = WindowManager.LayoutParams::class.java
+                .getDeclaredField("mBackgroundBlurRadius")
+            field.isAccessible = true
+            field.setInt(params, radiusPx)
+            ModuleLog.d("background blur radius=${radiusPx}px (window-bounds only)")
         } catch (t: Throwable) {
-            ModuleLog.w("enableBlurBehind failed", t)
+            ModuleLog.w("background blur unavailable (${t.message}); translucent-only glass")
         }
     }
 
@@ -171,7 +182,7 @@ class OverlayController(
         params.height = barH
         params.x = 0
         // Re-apply blur radius in case settings changed.
-        enableBlurBehind(params)
+        applyBackgroundBlur(params)
 
         if (settings.manualPlacement) {
             params.y = dp(settings.manualBottomOffsetDp)
