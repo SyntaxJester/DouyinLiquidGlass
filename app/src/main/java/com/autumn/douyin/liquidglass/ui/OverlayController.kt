@@ -14,16 +14,24 @@ import com.autumn.douyin.liquidglass.nativebar.NativeBottomBarLocator
 import com.autumn.douyin.liquidglass.settings.ModuleSettings
 
 /**
- * Owns the lifecycle of one glass overlay for one [Activity]: creates the view,
- * attaches it to the window at the right spot, drives the backdrop capture, and
- * repositions itself. Call [install] once per resumed activity and [remove]
- * when it pauses / is destroyed.
+ * Owns one glass overlay for one [Activity].
  *
- * Placement has two modes (see [ModuleSettings.manualPlacement]):
- *   - manual : pin to the bottom of the screen. Always works, version-proof.
- *   - auto   : ask [NativeBottomBarLocator] to align with Douyin's real bar.
+ * v1.3 rendering model: NO screen capture. The frosted look is produced by
+ *   (a) the system's cross-window blur behind the overlay window
+ *       (WindowManager.LayoutParams.setBlurBehindRadius + FLAG_BLUR_BEHIND,
+ *        API 31+; blurs whatever is behind — including video SurfaceViews —
+ *        and can never sample our own pixels), and
+ *   (b) translucent Canvas gradients drawn by [LiquidGlassOverlayView].
+ *
+ * This eliminates the white-out that PixelCopy caused: Douyin plays video on a
+ * hardware SurfaceView that PixelCopy cannot read, so the old capture returned
+ * a blank/white frame and we painted white.
+ *
+ * Placement (see [ModuleSettings.manualPlacement]):
+ *   - manual : pin to the bottom of the screen. Version-proof.
+ *   - auto   : align with Douyin's native bar via [NativeBottomBarLocator].
  */
-@RequiresApi(Build.VERSION_CODES.TIRAMISU)
+@RequiresApi(Build.VERSION_CODES.S)
 class OverlayController(
     private val activity: Activity,
     private var settings: ModuleSettings
@@ -31,8 +39,8 @@ class OverlayController(
 
     private val density = activity.resources.displayMetrics.density
     private var overlay: LiquidGlassOverlayView? = null
-    private var backdrop: DynamicBitmapBackdrop? = null
     private var attached = false
+    private var dedicatedWindow = false
     private var toastShown = false
 
     private fun dp(v: Float) = (v * density).toInt()
@@ -49,28 +57,15 @@ class OverlayController(
         }
         attached = true
 
-        // Only run live backdrop capture when we own a dedicated window;
-        // otherwise PixelCopy would capture our own pixels and white out.
-        val capture = if (dedicatedWindow) DynamicBitmapBackdrop(activity, view) else null
-        backdrop = capture
         view.post {
             reposition()
-            capture?.start()
             maybeToast()
         }
     }
 
-    /** True after [tryAttach] when the overlay got its own WindowManager window
-     * (safe for live PixelCopy). False when it fell back to a content child
-     * (must use static glass to avoid a self-capture white-out). */
-    private var dedicatedWindow = false
-
-    /** Try a panel sub-window first, then a plain application window, then a
-     * decor-view child as a last resort so *something* always shows. */
     private fun tryAttach(view: LiquidGlassOverlayView): Boolean {
         val token = activity.window?.decorView?.windowToken
 
-        // Strategy 1 & 2: dedicated WindowManager window (no self-capture loop).
         val windowTypes = intArrayOf(
             WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
             WindowManager.LayoutParams.TYPE_APPLICATION
@@ -81,9 +76,9 @@ class OverlayController(
                 if (type == WindowManager.LayoutParams.TYPE_APPLICATION_PANEL) {
                     params.token = token
                 }
+                enableBlurBehind(params)
                 activity.windowManager.addView(view, params)
                 dedicatedWindow = true
-                view.liveBackdrop = true
                 ModuleLog.i("overlay attached (windowType=$type) to ${activity.javaClass.simpleName}")
                 return true
             } catch (t: Throwable) {
@@ -91,10 +86,9 @@ class OverlayController(
             }
         }
 
-        // Strategy 3: add straight into the activity content root. PixelCopy of
-        // the whole window WOULD capture our own overlay here, creating a
-        // feedback loop that whites out the bar. So in this mode we render a
-        // self-contained STATIC frosted glass and do NOT start capture.
+        // Fallback: content child. No cross-window blur available here, but the
+        // overlay is still fully translucent, so it just looks like a lighter
+        // frosted pill (never white).
         try {
             val content = activity.findViewById<ViewGroup>(android.R.id.content)
                 ?: (activity.window?.decorView as? ViewGroup)
@@ -107,14 +101,33 @@ class OverlayController(
                 }
                 content.addView(view, lp)
                 dedicatedWindow = false
-                view.liveBackdrop = false
-                ModuleLog.i("overlay attached as content child (static glass) to ${activity.javaClass.simpleName}")
+                ModuleLog.i("overlay attached as content child to ${activity.javaClass.simpleName}")
                 return true
             }
         } catch (t: Throwable) {
             ModuleLog.w("attach as content child failed: ${t.message}")
         }
         return false
+    }
+
+    /** Turn on system cross-window blur behind our window, when supported. */
+    private fun enableBlurBehind(params: WindowManager.LayoutParams) {
+        try {
+            params.flags = params.flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
+            val supported = activity.windowManager.isCrossWindowBlurEnabled
+            if (supported) {
+                val px = dp(settings.blurRadiusDp).coerceIn(0, 80)
+                params.blurBehindRadius = px
+                // A faint scrim so the blur reads even over bright content.
+                params.dimAmount = 0.06f
+                params.flags = params.flags or WindowManager.LayoutParams.FLAG_DIM_BEHIND
+                ModuleLog.d("cross-window blur enabled, radius=${px}px")
+            } else {
+                ModuleLog.d("cross-window blur NOT supported on this ROM; translucent-only glass")
+            }
+        } catch (t: Throwable) {
+            ModuleLog.w("enableBlurBehind failed", t)
+        }
     }
 
     private fun maybeToast() {
@@ -139,7 +152,6 @@ class OverlayController(
         val marginH = dp(settings.horizontalMarginDp)
         val barH = dp(settings.barHeightDp)
 
-        // Content-child attachment uses FrameLayout params, not window params.
         if (params !is WindowManager.LayoutParams) {
             (params as? ViewGroup.MarginLayoutParams)?.let {
                 it.height = barH
@@ -158,6 +170,8 @@ class OverlayController(
         params.width = screenW - marginH * 2
         params.height = barH
         params.x = 0
+        // Re-apply blur radius in case settings changed.
+        enableBlurBehind(params)
 
         if (settings.manualPlacement) {
             params.y = dp(settings.manualBottomOffsetDp)
@@ -182,8 +196,6 @@ class OverlayController(
 
     private fun hideNativeBar(bar: View) {
         try {
-            // Keep it laid out (so tab clicks still register underneath the
-            // non-touchable glass) but invisible.
             bar.alpha = 0f
         } catch (t: Throwable) {
             ModuleLog.w("hideNativeBar failed", t)
@@ -201,11 +213,9 @@ class OverlayController(
     }
 
     fun remove() {
-        backdrop?.stop()
-        backdrop = null
         val view = overlay ?: return
         try {
-            when (val p = view.layoutParams) {
+            when (view.layoutParams) {
                 is WindowManager.LayoutParams -> if (attached) activity.windowManager.removeView(view)
                 else -> (view.parent as? ViewGroup)?.removeView(view)
             }

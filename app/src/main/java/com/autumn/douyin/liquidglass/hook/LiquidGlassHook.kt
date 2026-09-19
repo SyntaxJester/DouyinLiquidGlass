@@ -37,9 +37,10 @@ class LiquidGlassHook : IXposedHookLoadPackage {
         if (lpparam.packageName != DOUYIN_PACKAGE) return
         if (lpparam.processName != DOUYIN_PACKAGE) return
 
-        // AGSL / RuntimeShader requires API 33+.
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-            ModuleLog.w("Device is below Android 13; liquid glass shaders unavailable.")
+        // Cross-window blur needs API 31+ (Android 12). Below that we still
+        // draw the translucent glass, just without system blur behind it.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            ModuleLog.w("Device is below Android 12; overlay disabled.")
             return
         }
 
