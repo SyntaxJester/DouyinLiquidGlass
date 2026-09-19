@@ -25,6 +25,11 @@
         <meta-data
             android:name="xposedscope"
             android:resource="@array/xposed_scope" />
+        <!-- Let LSPosed relocate our prefs to a world-readable path so the
+             hook (running inside Douyin) can read them live. -->
+        <meta-data
+            android:name="xposedsharedprefs"
+            android:value="true" />
 
         <activity
             android:name=".status.ModuleStatusActivity"

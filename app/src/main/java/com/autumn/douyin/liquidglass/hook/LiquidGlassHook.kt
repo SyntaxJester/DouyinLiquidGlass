@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.Bundle
 import com.autumn.douyin.liquidglass.ModuleLog
 import com.autumn.douyin.liquidglass.settings.ModuleSettings
+import com.autumn.douyin.liquidglass.settings.XposedSettings
 import com.autumn.douyin.liquidglass.ui.OverlayController
 import de.robv.android.xposed.IXposedHookLoadPackage
 import de.robv.android.xposed.callbacks.XC_LoadPackage
@@ -65,15 +66,33 @@ class LiquidGlassHook : IXposedHookLoadPackage {
 
     @Suppress("NewApi")
     private fun onActivityResumed(activity: Activity) {
-        if (!settings.enabled) return
-        if (controllers.containsKey(activity)) {
-            controllers[activity]?.reposition()
+        // Re-read live settings each time an activity resumes so in-app changes
+        // take effect without reinstalling the module.
+        settings = XposedSettings.load()
+        if (!settings.enabled) {
+            controllers.remove(activity)?.remove()
+            return
+        }
+        val existing = controllers[activity]
+        if (existing != null) {
+            existing.applySettings(settings)
             return
         }
         try {
             val controller = OverlayController(activity, settings)
             controllers[activity] = controller
             controller.install()
+            // One-shot view-tree dump to help tune NativeBottomBarLocator per
+            // Douyin version. Delayed so the tab bar is laid out first.
+            if (ModuleLog.verbose && !settings.manualPlacement) {
+                activity.window?.decorView?.postDelayed({
+                    try {
+                        com.autumn.douyin.liquidglass.nativebar.ViewTreeDumper
+                            .dumpBottomRegion(activity)
+                    } catch (_: Throwable) {
+                    }
+                }, 1500)
+            }
         } catch (t: Throwable) {
             ModuleLog.e("install overlay failed for ${activity.javaClass.name}", t)
         }
