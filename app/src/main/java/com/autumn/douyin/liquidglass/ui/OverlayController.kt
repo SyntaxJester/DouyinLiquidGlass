@@ -49,14 +49,21 @@ class OverlayController(
         }
         attached = true
 
-        val capture = DynamicBitmapBackdrop(activity, view)
+        // Only run live backdrop capture when we own a dedicated window;
+        // otherwise PixelCopy would capture our own pixels and white out.
+        val capture = if (dedicatedWindow) DynamicBitmapBackdrop(activity, view) else null
         backdrop = capture
         view.post {
             reposition()
-            capture.start()
+            capture?.start()
             maybeToast()
         }
     }
+
+    /** True after [tryAttach] when the overlay got its own WindowManager window
+     * (safe for live PixelCopy). False when it fell back to a content child
+     * (must use static glass to avoid a self-capture white-out). */
+    private var dedicatedWindow = false
 
     /** Try a panel sub-window first, then a plain application window, then a
      * decor-view child as a last resort so *something* always shows. */
@@ -75,6 +82,8 @@ class OverlayController(
                     params.token = token
                 }
                 activity.windowManager.addView(view, params)
+                dedicatedWindow = true
+                view.liveBackdrop = true
                 ModuleLog.i("overlay attached (windowType=$type) to ${activity.javaClass.simpleName}")
                 return true
             } catch (t: Throwable) {
@@ -82,10 +91,10 @@ class OverlayController(
             }
         }
 
-        // Strategy 3: add straight into the activity content root. This always
-        // renders, but PixelCopy of the whole window would then capture our own
-        // overlay -> DynamicBitmapBackdrop handles that by excluding via
-        // visibility toggling; here we simply accept a slightly softer look.
+        // Strategy 3: add straight into the activity content root. PixelCopy of
+        // the whole window WOULD capture our own overlay here, creating a
+        // feedback loop that whites out the bar. So in this mode we render a
+        // self-contained STATIC frosted glass and do NOT start capture.
         try {
             val content = activity.findViewById<ViewGroup>(android.R.id.content)
                 ?: (activity.window?.decorView as? ViewGroup)
@@ -97,7 +106,9 @@ class OverlayController(
                     gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
                 }
                 content.addView(view, lp)
-                ModuleLog.i("overlay attached as content child to ${activity.javaClass.simpleName}")
+                dedicatedWindow = false
+                view.liveBackdrop = false
+                ModuleLog.i("overlay attached as content child (static glass) to ${activity.javaClass.simpleName}")
                 return true
             }
         } catch (t: Throwable) {

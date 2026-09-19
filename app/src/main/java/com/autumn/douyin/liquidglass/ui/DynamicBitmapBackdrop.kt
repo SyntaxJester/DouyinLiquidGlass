@@ -46,6 +46,7 @@ class DynamicBitmapBackdrop(
     private var running = false
 
     private var scratch: Bitmap? = null
+    private var blownOutStreak = 0
 
     private val captureRunnable = object : Runnable {
         override fun run() {
@@ -106,7 +107,22 @@ class DynamicBitmapBackdrop(
                 bmp,
                 { result ->
                     if (result == PixelCopy.SUCCESS) {
-                        overlay.backdropBitmap = bmp
+                        if (isBlownOut(bmp)) {
+                            // Self-capture feedback detected: the region is
+                            // almost pure white. Stop feeding live frames and
+                            // let the overlay fall back to static glass so it
+                            // can't keep accumulating to white.
+                            blownOutStreak++
+                            if (blownOutStreak >= 3) {
+                                ModuleLog.w("self-capture white-out detected; switching to static glass")
+                                overlay.liveBackdrop = false
+                                overlay.backdropBitmap = null
+                                stop()
+                            }
+                        } else {
+                            blownOutStreak = 0
+                            overlay.backdropBitmap = bmp
+                        }
                     } else if (ModuleLog.verbose) {
                         ModuleLog.d("PixelCopy result=$result")
                     }
@@ -116,5 +132,29 @@ class DynamicBitmapBackdrop(
         } catch (t: Throwable) {
             ModuleLog.w("PixelCopy request failed", t)
         }
+    }
+
+    /** Cheap check: sample a grid of pixels; if nearly all are near-white and
+     * near-opaque, we're almost certainly looking at our own overlay. */
+    private fun isBlownOut(bmp: Bitmap): Boolean {
+        if (bmp.isRecycled) return false
+        val cols = 6
+        val rows = 3
+        var white = 0
+        var total = 0
+        for (yi in 0 until rows) {
+            val y = (bmp.height - 1) * yi / (rows - 1).coerceAtLeast(1)
+            for (xi in 0 until cols) {
+                val x = (bmp.width - 1) * xi / (cols - 1).coerceAtLeast(1)
+                val p = bmp.getPixel(x, y)
+                val a = (p ushr 24) and 0xFF
+                val r = (p ushr 16) and 0xFF
+                val g = (p ushr 8) and 0xFF
+                val b = p and 0xFF
+                if (a > 240 && r > 244 && g > 244 && b > 244) white++
+                total++
+            }
+        }
+        return total > 0 && white >= (total * 0.9f).toInt()
     }
 }
